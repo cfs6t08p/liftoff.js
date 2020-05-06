@@ -2,8 +2,11 @@
 <div class="mt-5 container">
   <h1>Update Ignition app</h1>
   <hr>
-  <h3>Select .hex file to be programmed</h3>
-  <input type="file" accept=".hex" id="file-input">
+  <p>Make sure the device is turned ON, Ignition is installed and the bluetooth LED is pulsating slowly.</p>
+  <p>After selecting an .ign file, a bluetooth pairing prompt will appear, choose to pair with your device.</p>
+  <p>The update process should only take a few seconds.</p>
+  <h3>Select .ign file to be programmed</h3>
+  <input type="file" id="file-input">
   <div class="mt-3 progress">
     <div id="progress" class="progress-bar" style="width: 0%;"></div>
   </div>
@@ -109,12 +112,12 @@ function start(crc, blocks) {
   return buffer;
 }
 
-function blockdata(segment, data, offset) {
+function blockdata(segment, blocknum, data, offset) {
   let buffer = new ArrayBuffer(20);
   let view = new DataView(buffer);
   
   view.setUint8(0, 3);
-  view.setUint8(1, segment);
+  view.setUint8(1, segment | ((blocknum & 0xF) << 4));
   
   for(let i = 0; i < 18; i++) {
     view.setUint8(2 + i, data[offset + Math.trunc(i / 3) * 4 + i % 3]);
@@ -130,95 +133,105 @@ function liftoff(e) {
   let progress = document.getElementById('progress');
   
   reader.onload = async event => {
-    let rom = MemoryMap.fromHex(event.target.result);
-    
-    rom = rom.paginate(256, 0xFF);
-    
-    console.log(rom);
-    
-    let options = {
-      filters: [
-        {name: ['Launch']},
-      ],
-      optionalServices: ['88f80580-0000-01e6-aace-0002a5d5c51b'],
-    }
-    
-    let device = await(navigator.bluetooth.requestDevice(options));
-    
-    console.log(device);
-    
-    let gatt = await device.gatt.connect();
-    let service = await gatt.getPrimaryService('88f80580-0000-01e6-aace-0002a5d5c51b');
-    
-    let write = await service.getCharacteristic('88f8058c-0000-01e6-aace-0002a5d5c51b');
-    let read = await service.getCharacteristic('88f8058d-0000-01e6-aace-0002a5d5c51b');
-    
-    let words = 0;
-    
-    for(let addr of rom.keys()) {
-      let offset = (addr / 2 - 0x2000) + 0x80;
+    try {
+      let rom = MemoryMap.fromHex(event.target.result);
       
-      if(offset > words) {
-        words = offset;
-      }
-    }
-    
-    let blocks = Math.trunc(words / 0x80);
-    
-    console.log("blocks " + blocks);
-    
-    let crc = 0;
-    
-    for(let i = 0; i < blocks; i++) {
-      let offset = (0x2000 + i * 0x80) * 2;
-      let data = rom.get(offset);
+      rom = rom.paginate(256, 0xFF);
       
-      for(let j = 3; j < 256; j+=4) {
-        data[j] = 0;
+      console.log(rom);
+      
+      let options = {
+        filters: [
+          {name: ['Launch']},
+        ],
+        optionalServices: ['88f80580-0000-01e6-aace-0002a5d5c51b'],
       }
       
-      crc = crc32(data, crc);
-    }
-    
-    console.log("crc " + Number(crc).toString(16));
-    
-    await read.startNotifications();
-    
-    read.addEventListener('characteristicvaluechanged', async () => {
-      let val = read.value;
+      let device = await navigator.bluetooth.requestDevice(options);
       
-      console.log(val);
+      console.log(device);
       
-      let type = val.getUint8(0);
+      let gatt = await device.gatt.connect();
+      let service = await gatt.getPrimaryService('88f80580-0000-01e6-aace-0002a5d5c51b');
       
-      if(type == 2) {
-        let blocknum = val.getUint16(1, true);
-        let segments = val.getUint16(3, true);
-        let offset = (0x2000 + blocknum * 0x80) * 2;
+      let write = await service.getCharacteristic('88f8058c-0000-01e6-aace-0002a5d5c51b');
+      let read = await service.getCharacteristic('88f8058d-0000-01e6-aace-0002a5d5c51b');
+      
+      let words = 0;
+      
+      for(let addr of rom.keys()) {
+        let offset = (addr / 2 - 0x2000) + 0x80;
         
-        progress.innerHTML = (blocknum + 1) + " / " + blocks;
-        progress.style = "width: " + (((blocknum + 1) / blocks) * 100) + "%";
-        
-        console.log("offset " + offset);
-        
+        if(offset > words) {
+          words = offset;
+        }
+      }
+      
+      let blocks = Math.trunc(words / 0x80);
+      
+      console.log("blocks " + blocks);
+      
+      let crc = 0;
+      
+      for(let i = 0; i < blocks; i++) {
+        let offset = (0x2000 + i * 0x80) * 2;
         let data = rom.get(offset);
         
-        for(let i = 0; i < 11; i++) {
-          if(segments & (1 << i)) {
-            await write.writeValue(blockdata(i, data, i * 24));
-          }
+        for(let j = 3; j < 256; j+=4) {
+          data[j] = 0;
         }
-      } else if(type == 4) {
-        progress.className = "progress-bar bg-success";
-        device.gatt.disconnect();
-      } else if(type == 5) {
-        progress.className = "progress-bar bg-danger";
-        progress.innerHTML = "CRC mismatch (" + Number(val.getUint32(3, true)).toString(16) + ")";
-        device.gatt.disconnect();
+        
+        crc = crc32(data, crc);
       }
-    });
-    
-    write.writeValue(start(crc, blocks));
+      
+      console.log("crc " + Number(crc).toString(16));
+      
+      await read.startNotifications();
+      
+      read.addEventListener('characteristicvaluechanged', async () => {
+        let val = read.value;
+        
+        console.log(val);
+        
+        let type = val.getUint8(0);
+        
+        if(type == 2) {
+          let blocknum = val.getUint16(1, true);
+          let segments = val.getUint16(3, true);
+          let offset = (0x2000 + blocknum * 0x80) * 2;
+          
+          progress.innerHTML = (blocknum + 1) + " / " + blocks;
+          progress.style = "width: " + (((blocknum + 1) / blocks) * 100) + "%";
+          
+          console.log("get block " + blocknum);
+          
+          let data = rom.get(offset);
+          
+          for(let i = 0; i < 11; i++) {
+            if(segments & (1 << i)) {
+              await write.writeValue(blockdata(i, blocknum, data, i * 24));
+              
+              console.log("transmit segment " + i);
+            }
+          }
+        } else if(type == 4) {
+          progress.className = "progress-bar bg-success";
+          device.gatt.disconnect();
+        } else if(type == 5) {
+          progress.className = "progress-bar bg-danger";
+          progress.innerHTML = "CRC mismatch (" + Number(val.getUint32(3, true)).toString(16) + ")";
+          device.gatt.disconnect();
+        }
+      });
+      
+      write.writeValue(start(crc, blocks));
+    } catch(e) {
+      progress.className = "progress-bar bg-danger";
+      progress.innerHTML = "an error has occured";
+      progress.style = "width: 100%";
+      
+      console.error(e);
+    }
   }
   
   reader.readAsText(file);
